@@ -52,8 +52,6 @@ require "digest/md5"
 require 'fileutils'
 require 'rubygems'
 
-require 'zentest_mapping'
-
 $TESTING = false unless defined? $TESTING
 
 class CompilationError < RuntimeError; end
@@ -65,7 +63,7 @@ class CompilationError < RuntimeError; end
 # the current namespace.
 
 module Inline
-  VERSION = '3.11.0'
+  VERSION = '3.11.3'
 
   WINDOZE  = /mswin|mingw/ =~ RUBY_PLATFORM
   RUBINIUS = defined? RUBY_ENGINE
@@ -153,9 +151,6 @@ module Inline
   # and #remove_type_converter.
 
   class C
-
-    include ZenTestMapping
-
     MAGIC_ARITY_THRESHOLD = 15
     MAGIC_ARITY = -1
 
@@ -185,6 +180,37 @@ module Inline
       # Can't do these converters because they conflict with the above:
       # ID2SYM(x), SYM2ID(x), F\IX2UINT(x)
     }
+
+    # copied from ZenTestMapping
+    METHOD_TEST_NAME_MAP = [
+      ['!',   /_bang$/],
+      ['%',   /_percent$/],
+      ['&',   /_and$/],
+      ['*',   /_times$/],
+      ['**',  /_times2$/],
+      ['+',   /_plus$/],
+      ['-',   /_minus$/],
+      ['/',   /_div$/],
+      ['<',   /_lt$/],
+      ['<=',  /_lte$/],
+      ['<=>', /_spaceship$/],
+      ['<<',  /_lt2$/],
+      ['==',  /_equals2$/],
+      ['===', /_equals3$/],
+      ['=~',  /_equalstilde$/],
+      ['>',   /_gt$/],
+      ['>=',  /_ge$/],
+      ['>>',  /_gt2$/],
+      ['+@',  /_unary_plus$/],
+      ['-@',  /_unary_minus$/],
+      ['[]',  /_index$/],
+      ['[]=', /_index_equals$/],
+      ['^',   /_carat$/],
+      ['|',   /_or$/],
+      ['~',   /_tilde$/],
+      ['=',   /_equals$/],
+      ['?',   /_eh$/]
+    ]
 
     def strip_comments(src)
       # strip c-comments
@@ -293,7 +319,8 @@ module Inline
                 0
               end
 
-      file, line = caller[1].split(/:/)
+      file, line = $1, $2 if caller[1] =~ /(.*?):(\d+)/
+
       result = "# line #{line.to_i + delta} \"#{file}\"\n" + result unless
         $DEBUG and not $TESTING
 
@@ -373,6 +400,14 @@ module Inline
         @module_name = "Inline_#{module_name}_#{md5}"
       end
       @module_name
+    end
+
+    def test_to_normal(name)
+      name = name.dup
+      METHOD_TEST_NAME_MAP.each do |normal, test|
+        name.sub!(test, normal)
+      end
+      name
     end
 
     def so_name
@@ -567,19 +602,28 @@ VALUE #{method}_equals(VALUE value) {
                             nil
                           end
 
+          windoze = WINDOZE and RUBY_PLATFORM =~ /mswin/
+          sane = ! windoze
           cmd = [ RbConfig::CONFIG['LDSHARED'],
                   flags,
-                  RbConfig::CONFIG['DLDFLAGS'],
-                  RbConfig::CONFIG['CCDLFLAGS'],
+                  (RbConfig::CONFIG['DLDFLAGS']         if sane),
+                  (RbConfig::CONFIG['CCDLFLAGS']        if sane),
                   RbConfig::CONFIG['CFLAGS'],
+                  (RbConfig::CONFIG['LDFLAGS']          if sane),
                   '-I', hdrdir,
                   config_hdrdir,
                   '-I', RbConfig::CONFIG['includedir'],
-                  "-L#{RbConfig::CONFIG['libdir']}",
-                  '-o', so_name.inspect,
+                  ("-L#{RbConfig::CONFIG['libdir']}"    if sane),
+                  (['-o', so_name.inspect]              if sane),
                   File.expand_path(src_name).inspect,
                   libs,
-                  crap_for_windoze ].join(' ')
+                  crap_for_windoze,
+                  (RbConfig::CONFIG['LDFLAGS']          if windoze),
+                  (RbConfig::CONFIG['CCDLFLAGS']        if windoze),
+                ].compact.join(' ')
+
+         # strip off some makefile macros for mingw 1.9
+         cmd = cmd.gsub(/\$\(.*\)/, '') if RUBY_PLATFORM =~ /mingw/
 
           # TODO: remove after osx 10.5.2
           cmd += ' -flat_namespace -undefined suppress' if
@@ -587,8 +631,15 @@ VALUE #{method}_equals(VALUE value) {
           cmd += " 2> #{DEV_NULL}" if $TESTING and not $DEBUG
 
           warn "Building #{so_name} with '#{cmd}'" if $DEBUG
-          result = `#{cmd}`
+
+          result = if WINDOZE
+                     Dir.chdir(Inline.directory) { `#{cmd}` }
+                   else
+                     `#{cmd}`
+                   end
+
           warn "Output:\n#{result}" if $DEBUG
+
           if $? != 0 then
             bad_src_name = src_name + ".bad"
             File.rename src_name, bad_src_name
@@ -626,7 +677,7 @@ VALUE #{method}_equals(VALUE value) {
       # gawd windoze land sucks
       case RUBY_PLATFORM
       when /mswin32/ then
-        " -link /LIBPATH:\"#{RbConfig::CONFIG['libdir']}\" /DEFAULTLIB:\"#{RbConfig::CONFIG['LIBRUBY']}\" /INCREMENTAL:no /EXPORT:Init_#{module_name}"
+        " -link /OUT:\"#{self.so_name}\" /LIBPATH:\"#{RbConfig::CONFIG['libdir']}\" /DEFAULTLIB:\"#{RbConfig::CONFIG['LIBRUBY']}\" /INCREMENTAL:no /EXPORT:Init_#{module_name}"
       when /mingw32/ then
         c = RbConfig::CONFIG
         " -Wl,--enable-auto-import -L#{c['libdir']} -l#{c['RUBY_SO_NAME']}"
